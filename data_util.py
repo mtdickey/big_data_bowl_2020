@@ -5,10 +5,21 @@ Created on Mon Oct 19 18:16:43 2020
 @author: mtdic
 """
 
+import os
 import re
 import numpy as np
 import pandas as pd
 from datetime import datetime
+
+from sklearn.cluster import KMeans, DBSCAN
+import seaborn as sns
+
+#defining events that designate pass arrival
+PASS_ARRIVAL_EVENTS = ['pass_outcome_caught',
+                      'pass_arrived',
+                      'pass_outcome_incomplete',
+                      'pass_outcome_interception',
+                      'pass_outcome_touchdown']
 
 def orient_coords(df):
     """
@@ -38,12 +49,6 @@ def orient_coords(df):
     
     return df
 
-#defining events that designate pass arrival
-PASS_ARRIVAL_EVENTS = ['pass_outcome_caught',
-                      'pass_arrived',
-                      'pass_outcome_incomplete',
-                      'pass_outcome_interception',
-                      'pass_outcome_touchdown']
 
 def find_closest_defender_to_ball(df_plays_tracking_merge):
     """
@@ -192,3 +197,197 @@ def standardize_heights(heights):
             heights_std.append(int(h))
     
     return heights_std
+
+
+def read_tracking_for_player(nflId):
+    """
+    Read in player tracking data for a particular player.
+
+    Parameters
+    ----------
+    nflId : int
+        ID number for a player assigned by the NFL.
+
+    Returns
+    -------
+    tracking_df : DataFrame
+        Player tracking data for a specific player.
+    """
+    
+    os.chdir(r"E:/NFL/big_data_bowl/2021")
+    
+    ## Read in tracking data iteratively, subset to player and ball
+    WEEKS = list(range(1,18))
+    tracking_dfs = []
+    for w in WEEKS:
+        df_tracking = pd.read_csv(f"data/provided/week{w}.csv")
+        df_tracking = df_tracking[(df_tracking['nflId'] == nflId) | 
+                                  (df_tracking['position'] == 'QB') | ## Getting QB in case ball position is wrong
+                                  (df_tracking['displayName'] == 'Football')]
+        tracking_dfs.append(df_tracking)
+    tracking_df = pd.concat(tracking_dfs)
+    
+    return tracking_df
+
+
+def get_start_position_df(nflId, tracking_df):
+    """
+    Get limit the tracking data to the time of the ball snap and determine side of the ball
+
+    Parameters
+    ----------
+    nflId : int
+        ID number for a player assigned by the NFL.
+
+    Returns
+    -------
+    tracking_df : DataFrame
+        Player tracking data for a specific player at the time of ball snap.
+
+    """
+    tracking_df = tracking_df[tracking_df['event']=='ball_snap'].copy()
+    tracking_df = orient_coords(tracking_df)
+    
+    ## Determine the side of the ball that each receiver/corner is on
+    ### Get a dataframe with the position of the ball.. marking any time that the ball location is wonky
+    ball_position_df = (tracking_df[tracking_df['displayName'] == 'Football']
+                      .groupby(['gameId', 'playId', 'x', 'y']).size().reset_index().drop(columns=0)
+                      .rename(columns = {'x': 'football_x',
+                               'y': 'football_y'}))
+    ball_position_df['football_x'] = ball_position_df.apply(lambda x: 'Invalid' if ((x['football_y'] < 0) or 
+                                                                          (x['football_y'] > 53.3))
+                                                             else x['football_x'], axis=1)
+    ball_position_df['football_y'] = (ball_position_df['football_y']
+                                      .apply(lambda y: 'Invalid' if ((y < 0) or (y > 53.3))
+                                             else y))
+    
+    ### Get a dataframe with the position of the QB (in case ball location sucks).. marking any time that the QB location is wonky
+    qb_position_df = (tracking_df[tracking_df['position'] == 'QB']
+                      .groupby(['gameId', 'playId', 'x', 'y']).size().reset_index().drop(columns=0)
+                      .rename(columns = {'x': 'qb_x',
+                               'y': 'qb_y'}))
+    qb_position_df['qb_x'] = qb_position_df.apply(lambda x: 'Invalid' if ((x['qb_y'] < 0) or 
+                                                                          (x['qb_y'] > 53.3))
+                                                             else x['qb_x'], axis=1)
+    qb_position_df['qb_y'] = (qb_position_df['qb_y']
+                               .apply(lambda y: 'Invalid' if ((y < 0) or (y > 53.3))
+                                                else y))
+    
+    ### Noticing a few plays where the ball is outside the field throughout the duration of the play:
+         ### game 2018123001, play 435
+         ### game 2018093006, play 623
+    ### Calling these "invalid" and using the QB position to determine side of the ball for WRs/CBs
+    #### Only plays this won't work with plays with bad ball sensor locations that are also Wildcat plays with a QB out wide
+    tracking_df = tracking_df.merge(ball_position_df)
+    tracking_df = tracking_df.merge(qb_position_df)
+    tracking_df['side_of_ball'] = tracking_df.apply(lambda x: None if (x['displayName'] == 'Football' 
+                                                                       or x['football_y'] == 'Invalid')
+                                                    else 'Left' if x['y'] > x['football_y']
+                                                    else 'Right' if x['y'] < x['football_y']
+                                                    else 'On-ball', axis=1)
+    tracking_df['side_of_ball'] = tracking_df.apply(lambda x: None if (x['football_y'] == 'Invalid'
+                                                                       and x['qb_y'] == 'Invalid')
+                                                    else 'Left' if (x['football_y'] == 'Invalid'
+                                                                    and x['y'] > x['qb_y'])
+                                                    else 'Right' if (x['football_y'] == 'Invalid'
+                                                                    and x['y'] < x['qb_y'])
+                                                    else 'On-ball' if (x['football_y'] == 'Invalid'
+                                                                    and x['y'] == x['qb_y'])
+                                                    else x['side_of_ball'], axis=1)
+        
+    tracking_df['right_side_ind'] = (tracking_df['side_of_ball']
+                                     .apply(lambda x: 1 if x == 'Right' else 0) )
+    tracking_df['left_side_ind'] = (tracking_df['side_of_ball']
+                                     .apply(lambda x: 1 if x == 'Left' else 0) )
+    
+    tracking_df['x_minus_ball_x'] = tracking_df.apply(lambda x: x['x']-x['football_x'] if x['football_x'] != 'Invalid'
+                                                      else None, axis=1)
+    
+    tracking_df = tracking_df[tracking_df['nflId']==nflId].copy()
+    
+    return tracking_df
+
+
+def get_top_speeds(position = 'DB'):
+    """
+
+    Parameters
+    ----------
+    position : str, optional
+        Player position to gather top speeds for. The default is 'DB', which gets all CBs and safeties.
+
+    Returns
+    -------
+    top_speeds_df : TYPE
+        DESCRIPTION.
+
+    """
+    os.chdir(r"E:/NFL/big_data_bowl/2021")
+    
+    if position == 'DB':
+        positions = ['CB', 'DB', 'FS', 'SS', 'S']
+    else:
+        positions = [position]
+    
+    ## Read in tracking data iteratively, subset to player and ball
+    WEEKS = list(range(1,18))
+    top_speeds_dfs = []
+    for w in WEEKS:
+        df_tracking = pd.read_csv(f"data/provided/week{w}.csv")
+        df_tracking = df_tracking[(df_tracking['position'].isin(positions)) &
+                                  (df_tracking['s'] < 20) &
+                                  ((df_tracking['gameId'] != 2018102101) &
+                                   (df_tracking['nflId'] != 2495775.0))]  ## remove impossible speeds and anomalous Eric Weddle game
+        top_speeds_df = (df_tracking.query("s < 13")
+                                    .groupby('nflId').agg({'s': max,
+                                                           'a': max,
+                                                           'playId': 'nunique'})
+                                    .reset_index()
+                                    .rename(columns = {'s': 'max_speed',
+                                                       'a': 'max_accel',
+                                                       'playId': 'n_plays'}))
+        top_speeds_dfs.append(top_speeds_df)
+    top_speeds_concat = pd.concat(top_speeds_dfs)
+    top_speeds_df = (top_speeds_concat.groupby('nflId').agg({'max_speed': max,
+                                                            'max_accel': max,
+                                                            'n_plays': sum})
+                                    .reset_index())
+    
+    return top_speeds_df
+
+
+class DBIsland:
+    def __init__(self, nflId):
+        self.nflId = nflId
+        self.player_tracking_df = read_tracking_for_player(nflId)
+        self.start_position_df = get_start_position_df(nflId, self.player_tracking_df)
+        self.start_position_clusters = None
+    
+    def cluster_start_positions(self, eps = 1, min_samples=5):
+        db_clusters = (DBSCAN(eps=eps, min_samples=min_samples)
+                       .fit(self.start_position_df[['x_minus_ball_x', 'y']]))
+        
+        self.start_position_df['cluster'] = db_clusters.labels_
+        
+        self.start_position_clusters = (self.start_position_df[self.start_position_df['cluster'] != -1]
+                                         .groupby(['cluster', 'side_of_ball'])
+                                         .agg({'x_minus_ball_x': np.mean,
+                                               'y': np.mean,
+                                               'playId': len})
+                                         .reset_index()
+                                         .rename(columns = {'x_minus_ball_x': 'cluster_center_x',
+                                                            'y': 'cluster_center_y',
+                                                            'playId': 'n_plays'}))
+    
+    def plot_start_position_clusters(self):
+        
+        if self.start_position_clusters is None:
+            self.cluster_start_positions()
+        
+        self.start_position_df['negative_y'] = self.start_position_df['y']*-1
+        
+        ### Make the scatterplot
+        sns.scatterplot(data=self.start_position_df,
+                        y='x_minus_ball_x', x='negative_y',
+                        hue = 'cluster', palette="deep")
+        

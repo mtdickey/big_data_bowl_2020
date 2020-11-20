@@ -13,7 +13,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, DBSCAN
 
 ### Stuff created by me
 sys.path.append(r"C:\Users\mtdic\Documents\GitHub\big_data_bowl_2021")
@@ -45,12 +45,12 @@ df_targets = pd.read_csv("data/provided/targetedReceiver.csv")
 #%%
 
 
-## Read in tracking data iteratively, filtering to goal line plays
+## Read in tracking data iteratively
 WEEKS = list(range(1,18))
 tracking_dfs = []
 for w in WEEKS:
     df_tracking = pd.read_csv(f"data/provided/week{w}.csv")
-    df_tracking = df_tracking[(df_tracking['position'].isin(['WR', 'CB'])) | 
+    df_tracking = df_tracking[(df_tracking['position'].isin(['WR', 'CB', 'QB'])) | 
                               (df_tracking['displayName'] == 'Football')]
     df_tracking = df_tracking.merge(df_games[['gameId', 'homeTeamAbbr','visitorTeamAbbr']], on = 'gameId')
     tracking_dfs.append(df_tracking)
@@ -65,7 +65,7 @@ MAX_YD_LINE = 10
 goal_line_plays = df_plays[(df_plays['yardlineNumber'] <= MAX_YD_LINE) &
                            (df_plays['yardlineSide'] != df_plays['possessionTeam'])].copy()
 
-## Only keep tracking data for this analysis
+## Only keep tracking data for these plays for this analysis
 goal_line_tracking_df = df_tracking.merge(goal_line_plays, on = ['gameId', 'playId'])
 del tracking_df
 
@@ -443,7 +443,93 @@ plt.show()
 Other Ideas:
     1. Which players are the best at closely tracking receivers as they try to get open?
       - Co-travel analytics
+      - In other words: which corners are best at minimizing "separation" throughout a receiver's route?
+		 ○ Note: may need to isolate to man coverage plays here
       - Could we use "clusters" above to identify which physical traits allow DBs to track certain receivers better?
       - IMPACT: Inform DC/DB coaches when game planning matchups between their DBs and opponents receivers. 
     
 """
+
+#%%
+
+## Determine which side of the ball each receiver and CB are on, from the offense's perspective
+##  At the start of the play
+
+tracking_df = tracking_df[tracking_df['event']=='ball_snap'].copy()
+tracking_df = du.orient_coords(tracking_df)
+
+## Determine the side of the ball that each receiver/corner is on
+### Get a dataframe with the position of the ball.. marking any time that the ball location is wonky
+ball_position_df = (tracking_df[tracking_df['displayName'] == 'Football']
+                  .groupby(['gameId', 'playId', 'x', 'y']).size().reset_index().drop(columns=0)
+                  .rename(columns = {'x': 'football_x',
+                           'y': 'football_y'}))
+ball_position_df['football_x'] = ball_position_df.apply(lambda x: 'Invalid' if ((x['football_y'] < 0) or 
+                                                                      (x['football_y'] > 53.3))
+                                                         else x['football_x'], axis=1)
+ball_position_df['football_y'] = (ball_position_df['football_y']
+                                  .apply(lambda y: 'Invalid' if ((y < 0) or (y > 53.3))
+                                         else y))
+
+### Get a dataframe with the position of the QB (in case ball location sucks).. marking any time that the QB location is wonky
+qb_position_df = (tracking_df[tracking_df['position'] == 'QB']
+                  .groupby(['gameId', 'playId', 'x', 'y']).size().reset_index().drop(columns=0)
+                  .rename(columns = {'x': 'qb_x',
+                           'y': 'qb_y'}))
+qb_position_df['qb_x'] = qb_position_df.apply(lambda x: 'Invalid' if ((x['qb_y'] < 0) or 
+                                                                      (x['qb_y'] > 53.3))
+                                                         else x['qb_x'], axis=1)
+qb_position_df['qb_y'] = (qb_position_df['qb_y']
+                           .apply(lambda y: 'Invalid' if ((y < 0) or (y > 53.3))
+                                            else y))
+
+## Make a data frame with the furthest left and right locations of CBs and WRs
+## To determine whether a player is out wide or in the "slot" somewhere between out wide and the ball
+wr_cb_max_min_ys = (tracking_df[tracking_df['position'].isin(['CB', 'WR'])]
+                    .groupby(['gameId', 'playId', 'position'])
+                    .aggregate({'y': [max, min]}))
+wr_cb_max_min_ys.columns = ['_'.join(col) for col in wr_cb_max_min_ys.columns]
+wr_cb_max_min_ys = wr_cb_max_min_ys.reset_index()
+
+
+### Noticing a few plays where the ball is outside the field throughout the duration of the play:
+     ### game 2018123001, play 435
+     ### game 2018093006, play 623
+### Calling these "invalid" and using the QB position to determine side of the ball for WRs/CBs
+#### Only plays this won't work with plays with bad ball sensor locations that are also Wildcat plays with a QB out wide
+tracking_df = tracking_df.merge(ball_position_df)
+tracking_df = tracking_df.merge(qb_position_df)
+tracking_df = tracking_df.merge(wr_cb_max_min_ys)
+tracking_df['side_of_ball'] = tracking_df.apply(lambda x: None if (x['displayName'] == 'Football' 
+                                                                   or x['football_y'] == 'Invalid')
+                                                else 'Left' if x['y'] > x['football_y']
+                                                else 'Right' if x['y'] < x['football_y']
+                                                else 'On-ball', axis=1)
+tracking_df['side_of_ball'] = tracking_df.apply(lambda x: None if (x['football_y'] == 'Invalid'
+                                                                   and x['qb_y'] == 'Invalid')
+                                                else 'Left' if (x['football_y'] == 'Invalid'
+                                                                and x['y'] > x['qb_y'])
+                                                else 'Right' if (x['football_y'] == 'Invalid'
+                                                                and x['y'] < x['qb_y'])
+                                                else 'On-ball' if (x['football_y'] == 'Invalid'
+                                                                and x['y'] == x['qb_y'])
+                                                else x['side_of_ball'], axis=1)
+
+tracking_df['out_wide_ind'] = tracking_df.apply(lambda x: 1 if (x['y'] == x['y_max'] or
+                                                                x['y'] == x['y_min'])
+                                                     else 0, axis=1)
+
+tracking_df['right_side_ind'] = (tracking_df['side_of_ball']
+                                 .apply(lambda x: 1 if x == 'Right' else 0) )
+tracking_df['left_side_ind'] = (tracking_df['side_of_ball']
+                                 .apply(lambda x: 1 if x == 'Left' else 0) )
+
+wr_cb_right_left_side_pcts = (tracking_df[tracking_df['position'].isin(['CB', 'WR'])]
+                              .groupby('nflId')
+                              .aggregate({'right_side_ind': [np.mean],
+                                          'left_side_ind': [np.mean],
+                                          'out_wide_ind': [np.mean, len]}).reset_index())
+wr_cb_right_left_side_pcts.columns = wr_cb_right_left_side_pcts.columns.droplevel(1)
+wr_cb_right_left_side_pcts.columns = ['nflId', 'pct_right', 'pct_left', 'pct_out_wide', 'n_plays']
+
+wr_cb_right_left_side_pcts = wr_cb_right_left_side_pcts.merge(df_players[['nflId', 'displayName', 'position']])

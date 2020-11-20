@@ -5,9 +5,20 @@ Created on Mon Oct 19 15:38:46 2020
 @author: mtdic
 """
 
+import dateutil
+import numpy as np
+import pandas as pd
+from math import radians
+pd.set_option('max_columns', 100)
+
+## Viz
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+## Animation
+from matplotlib import animation
+from matplotlib.animation import FFMpegWriter
+
 
 def create_football_field(linenumbers=True,
                           endzones=True,
@@ -83,6 +94,143 @@ def create_football_field(linenumbers=True,
         plt.text(hl + 2, 50, '<- {}'.format(highlighted_name),
                  color='yellow')
     return fig, ax
+
+
+def calculate_dx_dy_arrow(x, y, angle, speed, multiplier):
+    if angle <= 90:
+        angle = angle
+        dx = np.sin(radians(angle)) * multiplier * speed
+        dy = np.cos(radians(angle)) * multiplier * speed
+        return dx, dy
+    if angle > 90 and angle <= 180:
+        angle = angle - 90
+        dx = np.sin(radians(angle)) * multiplier * speed
+        dy = -np.cos(radians(angle)) * multiplier * speed
+        return dx, dy
+    if angle > 180 and angle <= 270:
+        angle = angle - 180
+        dx = -(np.sin(radians(angle)) * multiplier * speed)
+        dy = -(np.cos(radians(angle)) * multiplier * speed)
+        return dx, dy
+    if angle > 270 and angle <= 360:
+        angle = 360 - angle
+        dx = -np.sin(radians(angle)) * multiplier * speed
+        dy = np.cos(radians(angle)) * multiplier * speed
+        return dx, dy
+    
+        
+def animate_player_movement(weekData, playId, gameId):
+    playData = pd.read_csv('../input/nfl-big-data-bowl-2021/plays.csv')
+    
+    playHome = weekData.query('gameId==' + str(gameId) + ' and playId==' + str(playId) + ' and team == "home"')
+    playAway = weekData.query('gameId==' + str(gameId) + ' and playId==' + str(playId) + ' and team == "away"')
+    playFootball = weekData.query('gameId==' + str(gameId) + ' and playId==' + str(playId) + ' and team == "football"')
+    
+    playHome['time'] = playHome['time'].apply(lambda x: dateutil.parser.parse(x).timestamp()).rank(method='dense')
+    playAway['time'] = playAway['time'].apply(lambda x: dateutil.parser.parse(x).timestamp()).rank(method='dense')
+    playFootball['time'] = playFootball['time'].apply(lambda x: dateutil.parser.parse(x).timestamp()).rank(method='dense')
+    
+    maxTime = int(playAway['time'].unique().max())
+    minTime = int(playAway['time'].unique().min())
+    
+    yardlineNumber = playData.query('gameId==' + str(gameId) + ' and playId==' + str(playId))['yardlineNumber'].item()
+    yardsToGo = playData.query('gameId==' + str(gameId) + ' and playId==' + str(playId))['yardsToGo'].item()
+    absoluteYardlineNumber = playData.query('gameId==' + str(gameId) + ' and playId==' + str(playId))['absoluteYardlineNumber'].item() - 10
+    playDir = playHome.sample(1)['playDirection'].item()
+    
+    if (absoluteYardlineNumber > 50):
+        yardlineNumber = 100 - yardlineNumber
+    if (absoluteYardlineNumber <= 50):
+        yardlineNumber = yardlineNumber
+        
+    if (playDir == 'left'):
+        yardsToGo = -yardsToGo
+    else:
+        yardsToGo = yardsToGo
+    
+    fig, ax = create_football_field(highlight_line=True, highlight_line_number=yardlineNumber, highlight_first_down_line=True, yards_to_go=yardsToGo)
+    playDesc = playData.query('gameId==' + str(gameId) + ' and playId==' + str(playId))['playDescription'].item()
+    plt.title(f'Game # {gameId} Play # {playId} \n {playDesc}')
+    
+    def update_animation(time):
+        patch = []
+        
+        homeX = playHome.query('time == ' + str(time))['x']
+        homeY = playHome.query('time == ' + str(time))['y']
+        homeNum = playHome.query('time == ' + str(time))['jerseyNumber']
+        homeOrient = playHome.query('time == ' + str(time))['o']
+        homeDir = playHome.query('time == ' + str(time))['dir']
+        homeSpeed = playHome.query('time == ' + str(time))['s']
+        homePosition = playHome.query('time == ' + str(time))['position']
+        homeCluster = playHome.query('time == ' + str(time))['cluster']
+        homeClusterProb = playHome.query('time == ' + str(time))['cluster_prob']
+        patch.extend(plt.plot(homeX, homeY, 'o',c='gold', ms=20, mec='white', zorder=3))
+        
+        # Home players' jersey number 
+        for x, y, num in zip(homeX, homeY, homeNum):
+            patch.append(plt.text(x, y, int(num), va='center', ha='center', color='black', size='medium'))
+            
+        # Home players' orientation
+        for x, y, orient in zip(homeX, homeY, homeOrient):
+            dx, dy = calculate_dx_dy_arrow(x, y, orient, 1, 1)
+            patch.append(plt.arrow(x, y, dx, dy, color='gold', width=0.5, shape='full'))
+            
+        # Home players' direction
+        for x, y, direction, speed in zip(homeX, homeY, homeDir, homeSpeed):
+            dx, dy = calculate_dx_dy_arrow(x, y, direction, speed, 1)
+            patch.append(plt.arrow(x, y, dx, dy, color='black', width=0.25, shape='full'))
+        
+        # CB coverage scheme
+        for x, y, pos, cluster, prob in zip(homeX, homeY, homePosition, homeCluster, homeClusterProb):
+            if pos == 'CB':
+                patch.append(plt.text(x, y-6, "P(zone)={}\nP(man)={}".format(prob, 1-prob), va='bottom', ha='center', color='black', size='small',zorder=2, bbox=dict(facecolor='gold', edgecolor='white', pad=2.0)))
+        
+        awayX = playAway.query('time == ' + str(time))['x']
+        awayY = playAway.query('time == ' + str(time))['y']
+        awayNum = playAway.query('time == ' + str(time))['jerseyNumber']
+        awayOrient = playAway.query('time == ' + str(time))['o']
+        awayDir = playAway.query('time == ' + str(time))['dir']
+        awaySpeed = playAway.query('time == ' + str(time))['s']
+        awayPosition = playAway.query('time == ' + str(time))['position']
+        awayCluster = playAway.query('time == ' + str(time))['cluster']
+        awayClusterProb = playAway.query('time == ' + str(time))['cluster_prob']
+        patch.extend(plt.plot(awayX, awayY, 'o',c='orangered', ms=20, mec='white', zorder=3))
+        
+        # Away players' jersey number 
+        for x, y, num in zip(awayX, awayY, awayNum):
+            patch.append(plt.text(x, y, int(num), va='center', ha='center', color='white', size='medium'))
+            
+        # Away players' orientation
+        for x, y, orient in zip(awayX, awayY, awayOrient):
+            dx, dy = calculate_dx_dy_arrow(x, y, orient, 1, 1)
+            patch.append(plt.arrow(x, y, dx, dy, color='orangered', width=0.5, shape='full'))
+        
+        # Away players' direction
+        for x, y, direction, speed in zip(awayX, awayY, awayDir, awaySpeed):
+            dx, dy = calculate_dx_dy_arrow(x, y, direction, speed, 1)
+            patch.append(plt.arrow(x, y, dx, dy, color='black', width=0.25, shape='full'))
+        
+        # CB coverage scheme
+        for x, y, pos, cluster, prob in zip(awayX, awayY, awayPosition, awayCluster, awayClusterProb):
+            if pos == 'CB':
+                patch.append(plt.text(x, y-6, "P(zone)={}\nP(man)={}".format(prob, 1-prob), va='bottom', ha='center', color='white', size='small', zorder=2, bbox=dict(facecolor='orangered', edgecolor='white', pad=2.0)))
+        
+        # Football location
+        footballX = playFootball.query('time == ' + str(time))['x']
+        footballY = playFootball.query('time == ' + str(time))['y']
+        patch.extend(plt.plot(footballX, footballY, 'o', c='black', ms=10, mec='white', zorder=3, data=playFootball.query('time == ' + str(time))['team']))
+        
+        
+        return patch
+    
+    ims = [[]]
+    for time in np.arange(minTime, maxTime+1):
+        patch = update_animation(time)
+        ims.append(patch)
+        
+    anim = animation.ArtistAnimation(fig, ims, repeat=False)
+    
+    return anim
 
 
 def create_height_dotplot(df, position):

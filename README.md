@@ -6,6 +6,7 @@ Analysis for NFL's 3rd Big Data Bowl, running from October 2020 to January 5th, 
 
 ##### Analysis
   - Notebooks:
+    - [*Fifty-Fifty.ipynb*](https://github.com/mtdickey/big_data_bowl_2021/tree/main/analysis/notebooks/Fifty-Fifty.ipynb): Analyzing how defenses can make "50-50" balls more in their favor.
     - [*Corner_Receiver_Clusters.ipynb*](https://github.com/mtdickey/big_data_bowl_2021/tree/main/analysis/notebooks/Corner_Receiver_Clusters.ipynb): Early idea to analyze which routes are most/least effective for each receiver/corner matchup.
   - Scripts:
     - *regressions_viz.py*: Modeling coverage success using tracking data and player attributes

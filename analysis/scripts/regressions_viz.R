@@ -121,6 +121,22 @@ ggplot(data_downfield, aes(x = receiver_distance_to_football, y = target)) +
        title = "Defenders have most success when only *slightly* taller than receivers")
 
 
+## Yards downfield, controlling for height diff
+yds_ht_int_fit = glm(target~ yds_thrown_past_los + height_diff_cat + 
+                               yds_thrown_past_los*height_diff_cat, data = data_downfield, family = binomial)
+
+
+data_downfield$yhi_preds = predict(yds_ht_int_fit, type = 'response')
+
+
+ggplot(data_downfield, aes(x = yds_thrown_past_los, y = target)) + 
+  geom_point(alpha=0.005) + 
+  geom_line(aes(x=yds_thrown_past_los, y = yhi_preds, colour = height_diff_cat), size=1.5) +
+  labs(x = '\nYds. Beyond LOS', y = 'Coverage Win Rate\n', colour = 'Height difference',
+       title = "Smaller defenders are better downfield\nBigger defenders are better closer to LOS")
+
+  
+
 ### All of the effects
 full_model = glm(target~ yds_thrown_past_los + receiver_distance_to_football + receiver_corner_dist_between +
                          height_diff_cat, data = data_downfield, family = binomial)
@@ -154,6 +170,7 @@ data_downfield %>% mutate(residual = target - full_model_preds) %>%
   filter(cnt > 50) %>%
   top_n(10, avg_residual) %>% arrange(desc(avg_residual))
 ## Some really top-notch corners in here.  But what is it about them all that makes them so good?
+ ## All are at least 5'11
 
 
 data_downfield %>% mutate(residual = target - full_model_preds) %>% 
@@ -162,3 +179,4 @@ data_downfield %>% mutate(residual = target - full_model_preds) %>%
   filter(cnt > 50) %>%
   top_n(-10, avg_residual) %>% arrange(avg_residual)
 ## Some less good corners..  Surprising to see Josh Norman who was once very highly regarded
+### A couple of 5'10 and 5'9 corners in this group

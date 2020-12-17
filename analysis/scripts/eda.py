@@ -167,6 +167,10 @@ df_train['receiver_minus_defender_height'] = df_train['receiver_height'] - df_tr
 
 ## Modeling Individual Features and Plotting
 #### See R script
+df_train[['gameId', 'playId', 'targetNflId', 'receiver_name', 'defenderNflId', 'defender_name',
+          'receiver_height', 'defender_height', 'receiver_minus_defender_height', 'target', 'target_descr',
+          'yds_thrown_past_los', 'defender_distance_to_football', 'receiver_corner_dist_between',
+          'receiver_distance_to_football']].to_csv("data/created/model_coverage_wins.csv", index = False)
 
 
 #%%

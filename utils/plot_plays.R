@@ -30,7 +30,7 @@ df_players <- read_csv("data/provided/players.csv",
 
 ##Reading tracking data (needs to be done iteratively)
 #weeks of NFL season
-weeks <- seq(15, 15)
+weeks <- seq(3, 3)
 
 #blank dataframe to store tracking data
 df_tracking <- data.frame()
@@ -70,7 +70,8 @@ example_play <- df_plays %>%
   select(gameId, playId, playDescription) %>% 
   #sample_n(1)
   #filter(playId == 329 & gameId == 2018091607)
-  filter(playId == 3565 & gameId == 2018121501)
+  #filter(playId == 3565 & gameId == 2018121501)
+  filter(playId == 4376 & gameId == 2018092308)
 
 #merging games data to play
 example_play <- inner_join(example_play,
@@ -168,4 +169,4 @@ animate_play <- ggplot() +
 
 play_length <- length(unique(example_play$frameId))
 animate(animate_play, fps = 10, nframe = play_length, renderer = gifski_renderer())
-anim_save("tj_carrie_hauling.gif")
+anim_save("longest_pass.gif")

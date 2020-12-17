@@ -13,7 +13,9 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from sklearn.cluster import KMeans, DBSCAN
+#from sklearn.cluster import KMeans, DBSCAN
+from sklearn.preprocessing import LabelEncoder
+
 
 ### Stuff created by me
 sys.path.append(r"C:\Users\mtdic\Documents\GitHub\big_data_bowl_2021")
@@ -35,15 +37,139 @@ df_plays = pd.read_csv("data/provided/plays.csv")
 #includes background info for players
 df_players = pd.read_csv("data/provided/players.csv")
 df_players['height'] = du.standardize_heights(df_players['height'])
-std_birthdates, ages = du.convert_birthdates_to_ages(df_players['birthDate'])
-df_players['birthDate'] = std_birthdates
-df_players['age'] = ages
+df_players['birthDate'], df_players['age'] = du.convert_birthdates_to_ages(df_players['birthDate'])
+
 
 ### BONUS Data: 
 df_targets = pd.read_csv("data/provided/targetedReceiver.csv")
 
 #%%
 
+### Making a training set for the incompletions over expected model
+df_train = df_plays.merge(df_targets)
+
+### Creating penalty fields to use in target variable creation
+df_train['penalty_code_list'] = df_train['penaltyCodes'].apply(lambda x: x.split(';') if type(x) == str else [])
+df_train['defense_cov_penalty_accepted'] = df_train.apply(lambda x: True if (x['playResult'] > x['offensePlayResult']) and
+                                                                            (('ICT' in x['penalty_code_list']) or
+                                                                             ('DPI' in x['penalty_code_list']) or
+                                                                             ('DH' in x['penalty_code_list']))
+                                                                    else False, axis = 1)
+df_train['offense_opi_penalty_accepted'] = df_train.apply(lambda x: True if (x['playResult'] < x['offensePlayResult']) and
+                                                                            ('OPI' in x['penalty_code_list'])
+                                                                    else False, axis = 1)
+
+## Make the target variable (defensive win/defense lose by penalty/defense lose by completion)
+df_train['target_descr'] = df_train.apply(lambda x: 'D-Win' if ( x['offense_opi_penalty_accepted'] or ((x['passResult'] in ['I', 'IN']) and 
+                                                                                                        not x['defense_cov_penalty_accepted'] ))
+                                         else 'D-Lose' if (x['defense_cov_penalty_accepted'] or (x['passResult'] == 'C'))
+                                         else None, axis = 1)
+df_train = df_train[df_train['target_descr'].isin(['D-Lose', 'D-Win'])]
+label_encoder = LabelEncoder()
+df_train['target'] = label_encoder.fit_transform(df_train['target_descr'])
+
+#%%
+
+## Data Cleaning.. Removing any plays where the ball is not in play
+
+## Read in tracking data iteratively
+WEEKS = list(range(1,18))
+tracking_dfs = []
+for w in WEEKS:
+    df_tracking = pd.read_csv(f"data/provided/week{w}.csv")
+    df_tracking = df_tracking[(df_tracking['displayName'] == 'Football')]
+    tracking_dfs.append(df_tracking)
+ball_tracking_df = pd.concat(tracking_dfs)
+del df_tracking, tracking_dfs, w
+
+## Make a column indicating if the ball is within the bounds of the field
+ball_tracking_df['football_in_play'] = ball_tracking_df.apply(lambda x:
+                                                 1 if ((x['displayName'] == "Football")
+                                                   and ((x['y'] < 53.3) and (x['y'] > 0) and
+                                                        (x['x'] < 120) and (x['x'] > 0)))
+                                                 else 0, axis=1)    
+
+
+## Creating a DF to be merged in containing x,y position of football throughout each play
+football_in_play_df = (ball_tracking_df.groupby(["gameId", "playId"])
+                                        .agg({'football_in_play': np.sum})
+                                        .reset_index())
+football_in_play_df['ball_in_play_ind'] = football_in_play_df['football_in_play'].apply(lambda x: True if x > 0
+                                                                                         else False)
+
+df_train = df_train.merge(football_in_play_df[['gameId', 'playId', 'ball_in_play_ind']], how = 'inner')
+
+## Only keep those where the ball is in play.
+df_train = df_train[df_train['ball_in_play_ind']]
+
+#%%
+
+## Pre-feature engineering
+### Load player tracking data for all plays in training set.  Include ball, defense, and receiver 
+## Read in tracking data iteratively
+WEEKS = list(range(1,18))
+tracking_dfs = []
+for w in WEEKS:
+    df_tracking = pd.read_csv(f"data/provided/week{w}.csv")
+    df_tracking = df_tracking.merge(df_targets)
+    df_tracking = df_tracking.merge(df_games[['gameId', 'homeTeamAbbr', 'visitorTeamAbbr', 'week']])
+    df_tracking = df_tracking.merge(df_plays[['gameId', 'playId', 'possessionTeam', 'yardlineNumber', 'absoluteYardlineNumber']])
+    df_tracking['isDefense'] = df_tracking.apply(lambda x:
+                                                 True if (((x['team'] == "home") &
+                                                               (x['possessionTeam'] == x['visitorTeamAbbr']))
+                                                           |  ((x['team'] == "away") &
+                                                               (x['possessionTeam'] == x['homeTeamAbbr'])))
+                                                 else False, axis=1)
+    df_tracking['isTargetedReceiver'] = df_tracking.apply(lambda x: True if x['nflId'] == x['targetNflId'] else False, axis=1)
+    df_tracking = df_tracking[(df_tracking['displayName'] == 'Football') | 
+                              (df_tracking['isTargetedReceiver']) |
+                              (df_tracking['isDefense'])]
+    tracking_dfs.append(df_tracking)
+train_tracking_df = pd.concat(tracking_dfs)
+del df_tracking, tracking_dfs, w
+
+
+## Orient coordinates so offense is always driving to the right
+train_tracking_df = du.orient_coords(train_tracking_df)
+
+## Find closest defender/receiver to ball at time of arrival and distances between of the 3 pairs.
+distances_df = du.find_distances_at_arrival(train_tracking_df)
+
+### Merge those features in
+df_train = df_train.merge(distances_df[['gameId', 'playId', 'defender_distance_to_football',
+                                        'receiver_corner_dist_between', 'receiver_distance_to_football',
+                                        'defenderNflId']])
+
+
+#%%
+
+### Find number of yards past LOS the ball was thrown 
+## (may want to weed out easy screen passes by looking at >5 yards downfield...
+#    plot it out to see what makes sense)
+yards_past_los_df = du.find_distance_thrown_downfield(train_tracking_df)
+df_train = df_train.merge(yards_past_los_df)
+
+#%%
+
+### Feature engineering
+####  Heights of corner/receiver
+df_train = df_train.merge(df_players[['nflId', 'displayName', 'height']], left_on = 'targetNflId', right_on = 'nflId').drop(columns = 'nflId')
+df_train = df_train.rename(columns = {'height': 'receiver_height',
+                                      'displayName': 'receiver_name'})
+
+df_train = df_train.merge(df_players[['nflId', 'displayName', 'height']], left_on = 'defenderNflId', right_on = 'nflId').drop(columns = 'nflId')
+df_train = df_train.rename(columns = {'height': 'defender_height',
+                                      'displayName': 'defender_name'})
+
+df_train['receiver_minus_defender_height'] = df_train['receiver_height'] - df_train['defender_height']
+
+#%%
+
+## Modeling Individual Features and Plotting
+#### See R script
+
+
+#%%
 
 ## Read in tracking data iteratively
 WEEKS = list(range(1,18))
@@ -533,3 +659,114 @@ wr_cb_right_left_side_pcts.columns = wr_cb_right_left_side_pcts.columns.dropleve
 wr_cb_right_left_side_pcts.columns = ['nflId', 'pct_right', 'pct_left', 'pct_out_wide', 'n_plays']
 
 wr_cb_right_left_side_pcts = wr_cb_right_left_side_pcts.merge(df_players[['nflId', 'displayName', 'position']])
+
+#%%
+"""
+
+This cell seeks to measure which corners are best at keeping minimal space between themselves and receivers
+throughout the course of a play.
+
+Methodology:
+    - Find the closest offensive player (their "matchup") to each corner at the start of a play
+    - Measure distance between corner and their "matchup" for each frame throughout the play
+    - Calculate summary distance metrics
+        - Average distance throughout the play
+        - "Closeout" distance (difference between distance at time of pass arrival and time of pass release)
+    - Measure correlation between distance metrics above and performance metrics (EPA, completion % allowed, etc.)
+    - Compare corners
+
+Drawbacks:
+    - Closest offensive player is not always the person that the corner is responsible for guarding throughout the play
+      - Ex. zone coverage and offensive formations with no receivers out wide
+    - 
+
+"""
+
+### Source tracking data
+tracking_df = pd.read_csv(r"C:\Users\mtdic\Documents\GitHub\big_data_bowl_2021\data\week15_kc_lac_tracking.csv") ## subset
+
+## Read in full data iteratively
+#os.chdir(r"E:\NFL\big_data_bowl\2021")
+#WEEKS = list(range(1,18))
+#tracking_dfs = []
+#for w in WEEKS:
+#    df_tracking = pd.read_csv(f"data/provided/week{w}.csv")
+#    df_tracking = df_tracking[(df_tracking['position'].isin(['WR', 'CB', 'QB'])) | 
+#                              (df_tracking['displayName'] == 'Football')]
+#    df_tracking = df_tracking.merge(df_games[['gameId', 'homeTeamAbbr','visitorTeamAbbr']], on = 'gameId')
+#    tracking_dfs.append(df_tracking)
+#tracking_df = pd.concat(tracking_dfs)
+#del df_tracking, tracking_dfs, w
+
+
+tracking_df = tracking_df.merge(df_plays[['gameId', 'playId', 'possessionTeam', 'penaltyCodes',
+                                          'epa', 'passResult', 'playResult', 'offensePlayResult',
+                                          'isDefensivePI']])
+tracking_df = tracking_df.merge(df_games[['gameId', 'homeTeamAbbr', 'visitorTeamAbbr']])
+
+
+## Get the presnap opponents
+presnap_opponent_df = du.find_closest_presnap_opponents(tracking_df, position = 'CB')
+
+### Compare the trajectories for the CB and person they were lined up closest to
+full_traj_dfs = []
+traj_summary_dfs = []
+for i, row in presnap_opponent_df.iterrows():
+    full_traj_df, traj_summary_df = (du.compare_trajectories(tracking_df,
+                                                          row['gameId'],
+                                                          row['playId'],
+                                                          row['nflId'],
+                                                          row['nflId_opponent']))
+    full_traj_dfs.append(full_traj_df)
+    traj_summary_dfs.append(traj_summary_df)
+traj_summary_full_df = pd.concat(traj_summary_dfs).reset_index().drop(columns='index')
+all_full_traj_df = pd.concat(full_traj_dfs).reset_index().drop(columns='index')
+
+## Merge trajectory summaries with targets
+traj_summary_full_df = traj_summary_full_df.merge(df_targets,
+                                                  left_on=['gameId', 'playId', 'nflId_off'],
+                                                  right_on = ['gameId', 'playId', 'targetNflId'],
+                                                  how = 'left')
+
+## Sometimes the target dataframe lists the QB as the targeted receiver when a sack happens.. let's remove those.
+traj_summary_full_df['targetNflId'] = traj_summary_full_df.apply(lambda x: np.nan if x['passResult'] == 'S'
+                                                                 else x['targetNflId'], axis = 1)
+traj_summary_full_df['isTargeted'] = traj_summary_full_df['targetNflId'].apply(lambda x: ~np.isnan(x))
+
+## Useful column to calcuate completion % while disregarding penalty plays
+traj_summary_full_df['completion_ind'] = traj_summary_full_df.apply(lambda x: 1 if x['passResult'] == 'C'
+                                                                    else np.nan if ((x['passResult'] == 'S') or
+                                                                                 ('DPI' in x['penaltyCodes'].split(';')) or
+                                                                                 ('ICT' in x['penaltyCodes'].split(';')) or
+                                                                                 ('DH' in x['penaltyCodes'].split(';')) or 
+                                                                                 ('DOF') in x['penaltyCodes'].split(';') or
+                                                                                 ( (x['offensePlayResult'] == 0) and (x['playResult'] > 0)))
+                                                                    else 0 if x['passResult'] in ['IN', 'I']
+                                                                    else np.nan, axis = 1)
+
+## Useful column to calculate penalties on defensive coverage (TODO: figure out if penalty is called on the player being evaluated)
+traj_summary_full_df['cov_penalty_ind'] = traj_summary_full_df.apply(lambda x: 1 if (('DPI' in x['penaltyCodes'].split(';')) or
+                                                                                     ('ICT' in x['penaltyCodes'].split(';')) or
+                                                                                     ('DH' in x['penaltyCodes'].split(';')))
+                                                                                    else 0, axis = 1)
+
+
+## Merge defensive player name
+df_defensive_player = df_players[['nflId', 'displayName']].rename(columns={'displayName': 'displayNameDefense'})
+traj_summary_full_df = traj_summary_full_df.merge(df_defensive_player, left_on = 'nflId_def', right_on = 'nflId').drop(columns='nflId')
+
+## Merge offensive player name
+df_offensive_player = df_players[['nflId', 'displayName']].rename(columns={'displayName': 'displayNameOffense'})
+traj_summary_full_df = traj_summary_full_df.merge(df_offensive_player, left_on = 'nflId_off', right_on = 'nflId').drop(columns='nflId')
+
+coverage_summary = (traj_summary_full_df[traj_summary_full_df['isTargeted']].groupby(['displayNameDefense'])
+                                                        .agg({'epa': np.mean,
+                                                              'playId': len,
+                                                              'completion_ind': np.nanmean,
+                                                              'cov_penalty_ind': np.mean}).sort_values('epa')
+                                                        .rename(columns = {'playId': 'n_targets',
+                                                                           'epa': 'avg_epa',
+                                                                           'completion_ind': 'completion_pct',
+                                                                           'cov_penalty_ind': 'cov_penalty_pct'}))
+
+traj_summary_full_df.to_csv(r"C:\Users\mtdic\Documents\GitHub\big_data_bowl_2021\data\kc_lac_traj_summary_12_2018.csv", index = False)

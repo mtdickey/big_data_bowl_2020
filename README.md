@@ -5,10 +5,13 @@ Analysis for NFL's 3rd Big Data Bowl, running from October 2020 to January 5th, 
 #### Organization
 
 ##### Analysis
-  - [*Big_Data_Bowl_Analysis.ipynb*](https://github.com/mtdickey/big_data_bowl_2021/blob/main/Big_Data_Bowl_Analysis.ipynb): Documented notebook with analyses and comments
-  - *eda.py*: Various exploratory analyses
+  - Notebooks:
+    - [*Corner_Receiver_Clusters.ipynb*](https://github.com/mtdickey/big_data_bowl_2021/tree/main/analysis/notebooks/Corner_Receiver_Clusters.ipynb): Early idea to analyze which routes are most/least effective for each receiver/corner matchup.
+  - Scripts:
+    - *regressions_viz.py*: Modeling coverage success using tracking data and player attributes
+    - *eda.py*: Various exploratory analyses (less organized than the notebooks)
   
-##### Utility Functions
+##### Utility Functions (utils)
 
   - *Visualization*
      - *viz_util.py*: Useful plotting functions in Python
